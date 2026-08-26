@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="${OMARCHY_SHORTEN_URL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.dmreiland.shorten-url/config.json}"
+
+die() { echo "omarchy-shorten-url-config: $*" >&2; exit 1; }
+
+normalize() {
+  local raw="$1"
+  jq -e '
+    if (.profiles? | type) == "object" then
+      .profiles as $profiles
+      | {defaultProfile: (.defaultProfile // ""), profiles: $profiles}
+    elif (.provider? | type) == "string" then
+      .provider as $provider
+      | {defaultProfile: "Default", profiles: {Default: ({type: $provider} + (.[$provider] // {}))}}
+    else
+      {defaultProfile: "", profiles: {}}
+    end
+  ' <<<"$raw" || die "configuration is not valid JSON"
+}
+
+validate() {
+  local normalized="$1"
+  jq -e '
+    (.profiles | type) == "object"
+    and all(.profiles | to_entries[];
+      (.key | type) == "string" and (.key | length) > 0
+      and (.value | type) == "object"
+      and (.value.type | IN("yourls", "shlink", "kutt", "polr", "bitly"))
+      and ((.value.apiUrl | type) == "string" and (.value.apiUrl | length) > 0)
+      and (
+        if .value.type == "yourls" then
+          ((.value.signature | type) == "string" and (.value.signature | length) > 0)
+          or (
+            (.value.username | type) == "string" and (.value.username | length) > 0
+            and (.value.password | type) == "string" and (.value.password | length) > 0
+          )
+        elif .value.type == "bitly" then
+          (.value.accessToken | type) == "string" and (.value.accessToken | length) > 0
+        else
+          (.value.apiKey | type) == "string" and (.value.apiKey | length) > 0
+        end
+      )
+    )
+    and (.defaultProfile as $default | ($default == "" or (.profiles | has($default))))
+  ' <<<"$normalized" >/dev/null || die "invalid provider profile"
+}
+
+read_config() {
+  [[ -f "$CONFIG_FILE" ]] || die "configuration not found: $CONFIG_FILE"
+  normalize "$(<"$CONFIG_FILE")"
+}
+
+write_config() {
+  local normalized="$1" dir tmp
+  validate "$normalized"
+  dir=$(dirname "$CONFIG_FILE")
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.config.XXXXXX")
+  chmod 600 "$tmp"
+  if ! jq -S . <<<"$normalized" >"$tmp"; then
+    rm -f "$tmp"
+    die "could not serialize configuration"
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+}
+
+case "${1:-}" in
+  --list)
+    cfg=$(read_config)
+    jq -c '.defaultProfile as $default | [.profiles | to_entries[] | {name: .key, isDefault: (.key == $default)} + .value] | sort_by(.name)' <<<"$cfg"
+    ;;
+  --get)
+    [[ $# == 2 ]] || die "usage: --get NAME"
+    cfg=$(read_config)
+    jq -e --arg name "$2" '.profiles[$name] // error("profile not found")' <<<"$cfg"
+    ;;
+  --save)
+    [[ $# == 2 ]] || die "usage: --save CONFIG_JSON"
+    normalized=$(normalize "$2")
+    write_config "$normalized"
+    ;;
+  --save-profile)
+    [[ $# == 3 ]] || die "usage: --save-profile NAME PROFILE_JSON"
+    if [[ -f "$CONFIG_FILE" ]]; then
+      cfg=$(read_config)
+    else
+      cfg='{"defaultProfile":"","profiles":{}}'
+    fi
+    profile=$(jq -e --arg name "$2" --argjson value "$3" '.profiles[$name] as $old | if $old and ($old.type != $value.type) then error("provider type cannot be changed") else $value end' <<<"$cfg") || die "invalid profile or provider type cannot be changed"
+    updated=$(jq -e --arg name "$2" --argjson value "$profile" '.profiles[$name] = $value | if .defaultProfile == "" then .defaultProfile = $name else . end' <<<"$cfg")
+    write_config "$updated"
+    ;;
+  --rename-profile)
+    [[ $# == 4 ]] || die "usage: --rename-profile OLD_NAME NEW_NAME PROFILE_JSON"
+    cfg=$(read_config)
+    updated=$(jq -e --arg old "$2" --arg new "$3" --argjson value "$4" '
+      if (.profiles | has($old)) | not then error("profile not found")
+      elif $old != $new and (.profiles | has($new)) then error("profile name already exists")
+      elif .profiles[$old].type != $value.type then error("provider type cannot be changed")
+      else
+        .profiles |= (del(.[$old]) + {($new): $value})
+        | if .defaultProfile == $old then .defaultProfile = $new else . end
+      end
+    ' <<<"$cfg") || die "invalid profile rename"
+    write_config "$updated"
+    ;;
+  --set-default)
+    [[ $# == 2 ]] || die "usage: --set-default NAME"
+    cfg=$(read_config)
+    updated=$(jq -e --arg name "$2" 'if .profiles | has($name) then .defaultProfile = $name else error("profile not found") end' <<<"$cfg") || die "profile not found: $2"
+    write_config "$updated"
+    ;;
+  --delete)
+    [[ $# == 2 ]] || die "usage: --delete NAME"
+    cfg=$(read_config)
+    updated=$(jq -e --arg name "$2" '
+      if (.profiles | has($name)) | not then error("profile not found")
+      else
+        (.profiles | del(.[$name]) | to_entries | map(.key)) as $remaining
+        | del(.profiles[$name])
+        | if .defaultProfile == $name then
+            .defaultProfile = ($remaining[0] // "")
+          else . end
+      end
+    ' <<<"$cfg") || die "profile not found: $2"
+    write_config "$updated"
+    ;;
+  *)
+    die "usage: --list | --get NAME | --save CONFIG_JSON | --save-profile NAME PROFILE_JSON | --rename-profile OLD_NAME NEW_NAME PROFILE_JSON | --set-default NAME | --delete NAME"
+    ;;
+esac

@@ -1,0 +1,15 @@
+{
+  "defaultProfile": "Acme Links",
+  "profiles": {
+    "Acme Links": {
+      "type": "shlink",
+      "apiUrl": "https://sh.example.com",
+      "apiKey": ""
+    },
+    "Personal YOURLS": {
+      "type": "yourls",
+      "apiUrl": "https://go.example.com/yourls-api.php",
+      "signature": ""
+    }
+  }
+}

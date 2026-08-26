@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_FILE="${OMARCHY_SHORTEN_URL_CONFIG:-$PLUGIN_DIR/config.json}"
+HISTORY_FILE="${OMARCHY_SHORTEN_URL_HISTORY:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url/history.json}"
+HISTORY_LIMIT=5
+
+usage() {
+  cat <<'EOF'
+Usage: omarchy-shorten-url [URL] [--profile NAME] [--provider yourls|shlink|kutt|polr|bitly] [--config PATH]
+       omarchy-shorten-url --history [N]
+       omarchy-shorten-url --copy TEXT
+
+If URL is omitted, it is read from the Wayland clipboard (wl-paste).
+The URL is shortened using the configured provider and the result is
+written back to the clipboard (wl-copy) and printed to stdout. The
+5 most recent shortened URLs are recorded and can be listed with
+--history (as a JSON array, most recent first).
+EOF
+}
+
+provider_override=""
+profile_override=""
+url=""
+show_history=false
+copy_mode=false
+copy_value=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --provider) provider_override="$2"; shift 2 ;;
+    --profile) profile_override="$2"; shift 2 ;;
+    --config) CONFIG_FILE="$2"; shift 2 ;;
+    --history)
+      show_history=true
+      shift
+      if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+        HISTORY_LIMIT="$1"
+        shift
+      fi
+      ;;
+    --copy) copy_mode=true; copy_value="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+die() {
+  echo "omarchy-shorten-url: $*" >&2
+  command -v notify-send >/dev/null 2>&1 && notify-send -u critical "Shorten URL" "$*"
+  exit 1
+}
+
+command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v curl >/dev/null 2>&1 || die "curl is required"
+
+if $show_history; then
+  if [[ -f "$HISTORY_FILE" ]]; then
+    jq -c ".[0:${HISTORY_LIMIT}]" "$HISTORY_FILE" 2>/dev/null || echo "[]"
+  else
+    echo "[]"
+  fi
+  exit 0
+fi
+
+if $copy_mode; then
+  [[ -n "$copy_value" ]] || die "no text provided to --copy"
+  command -v wl-copy >/dev/null 2>&1 || die "wl-copy is required"
+  printf '%s' "$copy_value" | wl-copy -n
+  exit 0
+fi
+
+if [[ -z "$url" ]]; then
+  command -v wl-paste >/dev/null 2>&1 || die "wl-paste is required to read the clipboard"
+  url="$(wl-paste -n 2>/dev/null | tr -d '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+fi
+
+[[ -n "$url" ]] || die "no URL provided and clipboard is empty"
+[[ "$url" =~ ^https?:// ]] || die "input does not look like a URL: $url"
+
+[[ -f "$CONFIG_FILE" ]] || die "config file not found: $CONFIG_FILE (copy config.example.json to config.json)"
+
+# config.json holds plaintext API credentials; keep it unreadable by other users.
+config_perms="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || echo '')"
+if [[ -n "$config_perms" && "$config_perms" != "600" && "$config_perms" != "400" ]]; then
+  echo "omarchy-shorten-url: warning: $CONFIG_FILE is readable beyond its owner (mode $config_perms); tightening to 600" >&2
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+fi
+
+profile_name=""
+if [[ -n "$profile_override" ]]; then
+  profile_name="$profile_override"
+elif [[ "$(jq -r 'if (.profiles? | type) == "object" then (.defaultProfile // empty) else empty end' "$CONFIG_FILE")" ]]; then
+  profile_name="$(jq -r '.defaultProfile // empty' "$CONFIG_FILE")"
+fi
+
+if [[ -n "$profile_name" ]]; then
+  [[ -z "$provider_override" ]] || die "--provider cannot be combined with --profile"
+  provider="$(jq -r --arg p "$profile_name" '.profiles[$p].type // empty' "$CONFIG_FILE")"
+  [[ -n "$provider" ]] || die "profile not found: $profile_name"
+else
+  provider="${provider_override:-$(jq -r '.provider // empty' "$CONFIG_FILE")}"
+fi
+[[ -n "$provider" ]] || die "no provider configured (set \"provider\" in $CONFIG_FILE or pass --provider)"
+
+# $provider is only interpolated into the jq filter below after the case
+# dispatch further down has confirmed it's a literal known provider name
+# (yourls/shlink/kutt/polr/bitly) — do not call cfg() before that check.
+cfg() {
+  if [[ -n "$profile_name" ]]; then
+    jq -r --arg p "$profile_name" --arg k "$1" '.profiles[$p][$k] // empty' "$CONFIG_FILE"
+  else
+    jq -r --arg p "$provider" --arg k "$1" '.[$p][$k] // empty' "$CONFIG_FILE"
+  fi
+}
+
+shorten_yourls() {
+  local api_url signature username password args short
+  api_url="$(cfg apiUrl)"
+  signature="$(cfg signature)"
+  username="$(cfg username)"
+  password="$(cfg password)"
+  [[ -n "$api_url" ]] || die "yourls.apiUrl not configured"
+
+  args=(--data-urlencode "action=shorturl" --data-urlencode "url=$url" --data-urlencode "format=json")
+  if [[ -n "$signature" ]]; then
+    args+=(--data-urlencode "signature=$signature")
+  elif [[ -n "$username" && -n "$password" ]]; then
+    args+=(--data-urlencode "username=$username" --data-urlencode "password=$password")
+  else
+    die "yourls requires either signature or username+password"
+  fi
+
+  short="$(curl -fsS "${args[@]}" "$api_url" | jq -r '.shorturl // empty')"
+  [[ -n "$short" ]] || die "yourls did not return a shorturl"
+  echo "$short"
+}
+
+shorten_shlink() {
+  local api_url api_key short
+  api_url="$(cfg apiUrl)"
+  api_key="$(cfg apiKey)"
+  [[ -n "$api_url" && -n "$api_key" ]] || die "shlink.apiUrl and shlink.apiKey must be configured"
+
+  short="$(curl -fsS -X POST "${api_url%/}/rest/v3/short-urls" \
+    -H "X-Api-Key: $api_key" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg u "$url" '{longUrl: $u}')" | jq -r '.shortUrl // empty')"
+  [[ -n "$short" ]] || die "shlink did not return a shortUrl"
+  echo "$short"
+}
+
+shorten_kutt() {
+  local api_url api_key short
+  api_url="$(cfg apiUrl)"
+  api_key="$(cfg apiKey)"
+  [[ -n "$api_url" && -n "$api_key" ]] || die "kutt.apiUrl and kutt.apiKey must be configured"
+
+  short="$(curl -fsS -X POST "${api_url%/}/api/v2/links" \
+    -H "X-API-KEY: $api_key" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg u "$url" '{target: $u}')" | jq -r '.link // empty')"
+  [[ -n "$short" ]] || die "kutt did not return a link"
+  echo "$short"
+}
+
+shorten_polr() {
+  local api_url api_key short
+  api_url="$(cfg apiUrl)"
+  api_key="$(cfg apiKey)"
+  [[ -n "$api_url" && -n "$api_key" ]] || die "polr.apiUrl and polr.apiKey must be configured"
+
+  short="$(curl -fsS -G "${api_url%/}/api/v2/action/shorten" \
+    --data-urlencode "url=$url" --data-urlencode "key=$api_key")"
+  [[ -n "$short" ]] || die "polr did not return a short URL"
+  echo "$short"
+}
+
+shorten_bitly() {
+  local api_url access_token short
+  api_url="$(cfg apiUrl)"
+  access_token="$(cfg accessToken)"
+  [[ -n "$api_url" && -n "$access_token" ]] || die "bitly.apiUrl and bitly.accessToken must be configured"
+
+  short="$(curl -fsS -X POST "${api_url%/}/v4/shorten" \
+    -H "Authorization: Bearer $access_token" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg u "$url" '{long_url: $u}')" | jq -r '.link // empty')"
+  [[ -n "$short" ]] || die "bitly did not return a link"
+  echo "$short"
+}
+
+case "$provider" in
+  yourls) short_url="$(shorten_yourls)" ;;
+  shlink) short_url="$(shorten_shlink)" ;;
+  kutt)   short_url="$(shorten_kutt)" ;;
+  polr)   short_url="$(shorten_polr)" ;;
+  bitly)  short_url="$(shorten_bitly)" ;;
+  *) die "unknown provider: $provider (expected yourls, shlink, kutt, polr, or bitly)" ;;
+esac
+
+record_history() {
+  local entry tmp dir
+  dir="$(dirname "$HISTORY_FILE")"
+  mkdir -p "$dir"
+  entry="$(jq -n --arg s "$short_url" --arg l "$url" --arg p "$provider" \
+    --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{shortUrl: $s, longUrl: $l, provider: $p, timestamp: $t}')"
+  tmp="$(mktemp "$dir/.history.XXXXXX")"
+  if [[ -f "$HISTORY_FILE" ]]; then
+    jq --argjson e "$entry" '([$e] + .) | .[0:5]' "$HISTORY_FILE" > "$tmp" 2>/dev/null || echo "[$entry]" > "$tmp"
+  else
+    echo "[$entry]" > "$tmp"
+  fi
+  mv "$tmp" "$HISTORY_FILE"
+  chmod 600 "$HISTORY_FILE" 2>/dev/null || true
+}
+
+record_history || echo "omarchy-shorten-url: warning: failed to record history" >&2
+
+if command -v wl-copy >/dev/null 2>&1; then
+  printf '%s' "$short_url" | wl-copy -n
+else
+  echo "omarchy-shorten-url: warning: wl-copy not found, clipboard not updated" >&2
+fi
+
+command -v notify-send >/dev/null 2>&1 && notify-send "Shorten URL" "$short_url"
+
+echo "$short_url"

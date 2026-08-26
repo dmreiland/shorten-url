@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dmreiland.shorten-url",
+  "name": "Shorten URL",
+  "version": "1.0.0",
+  "author": "Dan Reiland",
+  "license": "MIT",
+  "description": "Shorten a URL (from input or the clipboard) using a self-hosted or cloud-hosted shortener: YOURLS, Shlink, Kutt, Polr, or Bitly. The shortened URL is written back to the clipboard.",
+  "kinds": ["panel", "bar-widget", "service"],
+  "entryPoints": {
+    "panel": "UrlPrompt.qml",
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Shorten URL",
+    "category": "utility",
+    "allowMultiple": false
+  }
+}
