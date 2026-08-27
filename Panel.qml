@@ -38,6 +38,7 @@ Ui.Panel {
     property string editorSignature: ""
     property string editorUsername: ""
     property string editorPassword: ""
+    property string pendingProfileJson: ""
     readonly property string configHelperPath: Qt.resolvedUrl("bin/omarchy-shorten-url-config").toString().replace("file://", "")
     readonly property var profileNames: profileModel.getNames()
     readonly property var profileRecords: profileModel
@@ -157,7 +158,8 @@ Ui.Panel {
             root.editingProfile && root.editorName.trim() !== root.selectedProfile ? "--rename-profile" : "--save-profile"]
         if (root.editingProfile && root.editorName.trim() !== root.editingProfileName)
             profileWriter.command.push(root.editingProfileName)
-        profileWriter.command.push(root.editorName.trim(), root.profileJson())
+        profileWriter.command.push(root.editorName.trim())
+        root.pendingProfileJson = root.profileJson()
         profileWriter.running = true
     }
 
@@ -238,8 +240,11 @@ Ui.Panel {
 
     Process {
         id: profileWriter
+        stdinEnabled: true
         stderr: StdioCollector { id: profileWriterError; waitForEnd: true }
+        onStarted: profileWriter.write(root.pendingProfileJson + "\n")
         onExited: {
+            root.pendingProfileJson = ""
             if (exitCode !== 0) root.profileError = profileWriterError.text.trim() || "Could not save provider profile"
             else {
                 root.selectedProfile = root.editorName.trim()
@@ -475,6 +480,7 @@ Ui.Panel {
                         placeholderText: "API key"
                         echoMode: TextInput.Password
                         text: root.editorApiKey
+                        echoMode: TextInput.Password
                         onTextChanged: root.editorApiKey = text
                     }
 
@@ -483,6 +489,7 @@ Ui.Panel {
                         visible: root.editorType === "bitly"
                         placeholderText: "Access token"
                         text: root.editorAccessToken
+                        echoMode: TextInput.Password
                         onTextChanged: root.editorAccessToken = text
                     }
 
@@ -491,6 +498,7 @@ Ui.Panel {
                         visible: root.editorType === "yourls"
                         placeholderText: "Signature (or leave blank for username/password)"
                         text: root.editorSignature
+                        echoMode: TextInput.Password
                         onTextChanged: root.editorSignature = text
                     }
 

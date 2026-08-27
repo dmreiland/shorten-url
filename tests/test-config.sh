@@ -19,7 +19,7 @@ if "$helper" --list >/dev/null 2>&1; then
   exit 1
 fi
 
-"$helper" --save-profile "First Profile" '{"type":"shlink","apiUrl":"https://first.example","apiKey":"first-key"}'
+printf '%s\n' '{"type":"shlink","apiUrl":"https://first.example","apiKey":"first-key"}' | "$helper" --save-profile "First Profile"
 assert_eq "$("$helper" --get 'First Profile' | jq -r '.apiUrl')" "https://first.example"
 
 "$helper" --save "$config"
@@ -28,18 +28,18 @@ assert_eq "$("$helper" --list | jq -r '.[0].name')" "Acme Links"
 assert_eq "$("$helper" --get Personal | jq -r '.type')" "yourls"
 assert_eq "$("$helper" --get 'Acme Links' | jq -r '.apiKey')" "secret"
 
-"$helper" --save-profile "New Kutt" '{"type":"kutt","apiUrl":"https://kutt.example","apiKey":"key"}'
+printf '%s\n' '{"type":"kutt","apiUrl":"https://kutt.example","apiKey":"key"}' | "$helper" --save-profile "New Kutt"
 assert_eq "$("$helper" --get 'New Kutt' | jq -r '.type')" "kutt"
-if "$helper" --save-profile "New Kutt" '{"type":"bitly","apiUrl":"https://bitly.example","accessToken":"token"}' >/dev/null 2>&1; then
+if printf '%s\n' '{"type":"bitly","apiUrl":"https://bitly.example","accessToken":"token"}' | "$helper" --save-profile "New Kutt" >/dev/null 2>&1; then
   echo "profile type mutation unexpectedly succeeded" >&2
   exit 1
 fi
 
-"$helper" --save-profile "New Kutt" '{"type":"kutt","apiUrl":"https://new-kutt.example","apiKey":"new-key"}'
+printf '%s\n' '{"type":"kutt","apiUrl":"https://new-kutt.example","apiKey":"new-key"}' | "$helper" --save-profile "New Kutt"
 assert_eq "$("$helper" --get 'New Kutt' | jq -r '.apiUrl')" "https://new-kutt.example"
 
 "$helper" --set-default "New Kutt"
-"$helper" --rename-profile "New Kutt" "Renamed Kutt" '{"type":"kutt","apiUrl":"https://renamed.example","apiKey":"key"}'
+printf '%s\n' '{"type":"kutt","apiUrl":"https://renamed.example","apiKey":"key"}' | "$helper" --rename-profile "New Kutt" "Renamed Kutt"
 assert_eq "$(jq -r .defaultProfile "$OMARCHY_SHORTEN_URL_CONFIG")" "Renamed Kutt"
 if "$helper" --get "New Kutt" >/dev/null 2>&1; then
   echo "old profile name still exists after rename" >&2

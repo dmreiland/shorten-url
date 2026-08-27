@@ -230,6 +230,7 @@ Item {
                             placeholderText: "API key"
                             echoMode: TextInput.Password
                             text: root.controller.editorApiKey
+                            echoMode: TextInput.Password
                             onTextChanged: root.controller.editorApiKey = text
                         }
 
@@ -238,6 +239,7 @@ Item {
                             visible: root.controller.editorType === "bitly"
                             placeholderText: "Access token"
                             text: root.controller.editorAccessToken
+                            echoMode: TextInput.Password
                             onTextChanged: root.controller.editorAccessToken = text
                         }
 
@@ -246,6 +248,7 @@ Item {
                             visible: root.controller.editorType === "yourls"
                             placeholderText: "Signature (or leave blank for username/password)"
                             text: root.controller.editorSignature
+                            echoMode: TextInput.Password
                             onTextChanged: root.controller.editorSignature = text
                         }
 

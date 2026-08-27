@@ -84,20 +84,24 @@ case "${1:-}" in
     write_config "$normalized"
     ;;
   --save-profile)
-    [[ $# == 3 ]] || die "usage: --save-profile NAME PROFILE_JSON"
+    [[ $# == 2 ]] || die "usage: --save-profile NAME < PROFILE_JSON"
+    IFS= read -r profile || true
+    [[ -n "${profile:-}" ]] || die "profile JSON is required on stdin"
     if [[ -f "$CONFIG_FILE" ]]; then
       cfg=$(read_config)
     else
       cfg='{"defaultProfile":"","profiles":{}}'
     fi
-    profile=$(jq -e --arg name "$2" --argjson value "$3" '.profiles[$name] as $old | if $old and ($old.type != $value.type) then error("provider type cannot be changed") else $value end' <<<"$cfg") || die "invalid profile or provider type cannot be changed"
+    profile=$(jq -e --arg name "$2" --argjson value "$profile" '.profiles[$name] as $old | if $old and ($old.type != $value.type) then error("provider type cannot be changed") else $value end' <<<"$cfg") || die "invalid profile or provider type cannot be changed"
     updated=$(jq -e --arg name "$2" --argjson value "$profile" '.profiles[$name] = $value | if .defaultProfile == "" then .defaultProfile = $name else . end' <<<"$cfg")
     write_config "$updated"
     ;;
   --rename-profile)
-    [[ $# == 4 ]] || die "usage: --rename-profile OLD_NAME NEW_NAME PROFILE_JSON"
+    [[ $# == 3 ]] || die "usage: --rename-profile OLD_NAME NEW_NAME < PROFILE_JSON"
+    IFS= read -r profile || true
+    [[ -n "${profile:-}" ]] || die "profile JSON is required on stdin"
     cfg=$(read_config)
-    updated=$(jq -e --arg old "$2" --arg new "$3" --argjson value "$4" '
+    updated=$(jq -e --arg old "$2" --arg new "$3" --argjson value "$profile" '
       if (.profiles | has($old)) | not then error("profile not found")
       elif $old != $new and (.profiles | has($new)) then error("profile name already exists")
       elif .profiles[$old].type != $value.type then error("provider type cannot be changed")
@@ -130,6 +134,6 @@ case "${1:-}" in
     write_config "$updated"
     ;;
   *)
-    die "usage: --list | --get NAME | --save CONFIG_JSON | --save-profile NAME PROFILE_JSON | --rename-profile OLD_NAME NEW_NAME PROFILE_JSON | --set-default NAME | --delete NAME"
+    die "usage: --list | --get NAME | --save CONFIG_JSON | --save-profile NAME < PROFILE_JSON | --rename-profile OLD_NAME NEW_NAME < PROFILE_JSON | --set-default NAME | --delete NAME"
     ;;
 esac
