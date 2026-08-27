@@ -19,7 +19,7 @@ a self-hosted or cloud-hosted URL shortener: **YOURLS**, **Shlink**, **Kutt**, *
 2. Install the plugin:
 
    ```bash
-   omarchy plugin add <this-repo-url> --enable
+   omarchy plugin add https://github.com/dmreiland/shorten-url.git --enable
    ```
 
    or clone it directly into `~/.config/omarchy/plugins/io.github.dmreiland.shorten-url/`.
