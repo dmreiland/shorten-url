@@ -228,6 +228,7 @@ Item {
                             visible: root.controller.editorType !== "yourls"
                                 && root.controller.editorType !== "bitly"
                             placeholderText: "API key"
+                            echoMode: TextInput.Password
                             text: root.controller.editorApiKey
                             onTextChanged: root.controller.editorApiKey = text
                         }

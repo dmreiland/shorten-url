@@ -473,6 +473,7 @@ Ui.Panel {
                         Layout.fillWidth: true
                         visible: root.editorType !== "yourls" && root.editorType !== "bitly"
                         placeholderText: "API key"
+                        echoMode: TextInput.Password
                         text: root.editorApiKey
                         onTextChanged: root.editorApiKey = text
                     }
