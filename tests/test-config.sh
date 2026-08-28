@@ -91,14 +91,21 @@ echo "cleanup tests passed"
 
 echo "profile helper tests passed"
 
+# There is a single config dialect: a top-level "profiles" object. A
+# document in any other shape is rejected outright, not migrated.
 cat >"$OMARCHY_SHORTEN_URL_CONFIG" <<'EOF'
 {
   "provider": "shlink",
   "shlink": {
-    "apiUrl": "https://legacy.example",
-    "apiKey": "legacy-key"
+    "apiUrl": "https://not-a-profiles-document.example",
+    "apiKey": "key"
   }
 }
 EOF
-assert_eq "$("$helper" --list | jq -r '.[0].name')" "Default"
-assert_eq "$("$helper" --get Default | jq -r '.apiUrl')" "https://legacy.example"
+chmod 600 "$OMARCHY_SHORTEN_URL_CONFIG"
+if "$helper" --list >/dev/null 2>&1; then
+  echo "a config without a top-level \"profiles\" object unexpectedly succeeded" >&2
+  exit 1
+fi
+
+echo "schema rejection tests passed"

@@ -1,0 +1,139 @@
+# Shared helpers for safely reading the small JSON documents (config,
+# history) this plugin owns. Sourced by omarchy-shorten-url and
+# omarchy-shorten-url-config; not meant to be executed directly.
+#
+# The actual open/verify/read happens in omarchy-shorten-url-safe-read 
+# This file only parses the bytes that helper already verified and never
+# re-opens the path.
+#
+# READ_FILE_MAX_BYTES/READ_FILE_TIMEOUT/JSON_MAX_* are security ceilings,
+# not user-facing settings: an environment override can only lower them,
+# never raise them past the hardcoded default below.
+
+LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+SAFE_READ_HELPER="$LIB_DIR/omarchy-shorten-url-safe-read"
+
+command -v perl >/dev/null 2>&1 || { echo "omarchy-shorten-url: perl is required" >&2; exit 1; }
+
+# _clamp_ceiling VAR DEFAULT — a caller-supplied override can only tighten
+# VAR below DEFAULT, never raise it.
+_clamp_ceiling() {
+  local var="$1" default="$2" current=""
+  [[ -v "$var" ]] && current="${!var}"
+  if [[ "$current" =~ ^[1-9][0-9]*$ ]] && (( current < default )); then
+    printf -v "$var" '%s' "$current"
+  else
+    printf -v "$var" '%s' "$default"
+  fi
+}
+
+# A real config/history document for
+# this plugin has a handful of profiles/entries with short field values
+# (URLs, API keys, tokens), so 200 items and an 8192-byte string are already
+# generous headroom over any legitimate document while still bounding a
+# maliciously-shaped one.
+_clamp_ceiling READ_FILE_MAX_BYTES 65536
+_clamp_ceiling READ_FILE_TIMEOUT 5
+_clamp_ceiling JSON_MAX_NODES 5000
+_clamp_ceiling JSON_MAX_DEPTH 8
+_clamp_ceiling JSON_MAX_ITEMS 200
+_clamp_ceiling JSON_MAX_STRING_LEN 8192
+
+# read_bounded_file PATH [--credential]
+#
+# Prints PATH's bytes to stdout and returns 0, or prints nothing and
+# returns 1 — see omarchy-shorten-url-safe-read for the failure conditions
+# and the --credential fail-closed behavior. `timeout` here is only a
+# defense-in-depth backstop (e.g. a stalled network filesystem, where
+# O_NONBLOCK has no effect); it's not what makes FIFOs/symlinks safe.
+read_bounded_file() {
+  local path="$1" credential=0
+  [[ "${2:-}" == "--credential" ]] && credential=1
+  timeout "$READ_FILE_TIMEOUT" "$SAFE_READ_HELPER" "$path" "$READ_FILE_MAX_BYTES" "$credential"
+}
+
+# assert_json_limits — reads JSON on stdin, checks node count/depth/entry
+# count/string length against the JSON_MAX_* ceilings. Run before any other
+# jq filter touches a document: a maliciously-shaped document can fit
+# under the byte ceiling and still drive pathological jq recursion.
+assert_json_limits() {
+  jq -e --argjson maxNodes "$JSON_MAX_NODES" \
+        --argjson maxDepth "$JSON_MAX_DEPTH" \
+        --argjson maxItems "$JSON_MAX_ITEMS" \
+        --argjson maxStrLen "$JSON_MAX_STRING_LEN" '
+    ( [paths] | length ) as $nodes
+    | ( [paths] | map(length) | max // 0 ) as $depth
+    | ( [.. | arrays, objects | length] | max // 0 ) as $items
+    | ( [.. | strings | length] | max // 0 ) as $strlen
+    | $nodes <= $maxNodes
+      and $depth <= $maxDepth
+      and $items <= $maxItems
+      and $strlen <= $maxStrLen
+  ' >/dev/null
+}
+
+# assert_json_shape object|array — checks the top-level container type.
+# assert_json_limits alone doesn't catch this: a bare scalar is small and
+# shallow, so it can pass the ceilings and still reach a caller (e.g. the
+# panel's StdioCollector for --history) that assumes a specific shape.
+assert_json_shape() {
+  local expect="$1"
+  jq -e --arg expect "$expect" '
+    if $expect == "array" then
+      (type == "array") and (all(.[]; type == "object"))
+    else
+      type == "object"
+    end
+  ' >/dev/null
+}
+
+# canonicalize_config — reads a raw config document (already passed
+# through assert_json_limits and `assert_json_shape object`) on stdin,
+# prints its canonical {defaultProfile, profiles} form. There is a single
+# config dialect (a top-level "profiles" object); this does not sniff for
+# alternate shapes.
+canonicalize_config() {
+  jq -e '
+    if (.profiles? | type) == "object" then
+      {defaultProfile: (.defaultProfile // ""), profiles: .profiles}
+    else
+      empty
+    end
+  '
+}
+
+# assert_config_schema — reads a canonicalized config document (see
+# canonicalize_config) on stdin. The one schema-validation path shared by
+# omarchy-shorten-url and omarchy-shorten-url-config, for both reading and
+# writing config.json.
+assert_config_schema() {
+  jq -e '
+    (.profiles | type) == "object"
+    and all(.profiles | to_entries[];
+      (.key | type) == "string" and (.key | length) > 0
+      and (.value | type) == "object"
+      and (.value.type | IN("yourls", "shlink", "kutt", "polr", "bitly"))
+      and (
+        if .value.type == "bitly" then
+          true
+        else
+          ((.value.apiUrl | type) == "string" and (.value.apiUrl | length) > 0)
+        end
+      )
+      and (
+        if .value.type == "yourls" then
+          ((.value.signature | type) == "string" and (.value.signature | length) > 0)
+          or (
+            (.value.username | type) == "string" and (.value.username | length) > 0
+            and (.value.password | type) == "string" and (.value.password | length) > 0
+          )
+        elif .value.type == "bitly" then
+          (.value.accessToken | type) == "string" and (.value.accessToken | length) > 0
+        else
+          (.value.apiKey | type) == "string" and (.value.apiKey | length) > 0
+        end
+      )
+    )
+    and (.defaultProfile as $default | ($default == "" or (.profiles | has($default))))
+  ' >/dev/null
+}

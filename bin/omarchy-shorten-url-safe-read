@@ -1,0 +1,66 @@
+#!/usr/bin/env perl
+# Opens PATH with O_NOFOLLOW|O_NONBLOCK, verifies (via fstat on the
+# resulting descriptor, never by re-stat'ing the pathname) that it is a
+# regular file, optionally that it is owned by the caller with a
+# credential-safe mode, then reads at most MAX_BYTES+1 bytes from that same
+# descriptor and prints them to stdout only if the file did not exceed
+# MAX_BYTES. Exits nonzero and prints nothing to stdout on any failure.
+#
+# O_NOFOLLOW makes symlink rejection part of the open() syscall itself, so
+# there is no separate check-then-open window for a path to be swapped for
+# a symlink. O_NONBLOCK makes a FIFO (or other special file) swapped in for
+# PATH return immediately from open() rather than block; the subsequent
+# regular-file check then rejects it without ever attempting a read.
+#
+# Not meant to be invoked directly; called by read_bounded_file() in
+# omarchy-shorten-url-lib.
+use strict;
+use warnings;
+use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK);
+
+my ($path, $max_bytes, $credential) = @ARGV;
+if (!defined $path || !defined $max_bytes || $max_bytes !~ /^[0-9]+$/) {
+  print STDERR "usage: $0 PATH MAX_BYTES CREDENTIAL(0|1)\n";
+  exit 1;
+}
+$credential = (defined $credential && $credential eq '1') ? 1 : 0;
+
+sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;
+
+my @st = stat($fh) or exit 1;
+my $mode = $st[2];
+exit 1 unless (($mode & 0170000) == 0100000); # S_ISREG, checked on the fd
+
+if ($credential) {
+  my $owner = $st[4];
+  exit 1 unless $owner == $>;
+  my $perm = $mode & 07777;
+  if ($perm != 0600 && $perm != 0400) {
+    printf STDERR "omarchy-shorten-url: warning: %s is readable beyond its owner (mode %o); tightening to 600\n", $path, $perm;
+    unless (chmod(0600, $fh)) { # fchmod on the open descriptor
+      print STDERR "omarchy-shorten-url: error: could not tighten permissions on $path; refusing to read credentials\n";
+      exit 1;
+    }
+  }
+}
+
+binmode $fh;
+binmode STDOUT;
+
+my $buf = '';
+while (length($buf) <= $max_bytes) {
+  my $want = $max_bytes + 1 - length($buf);
+  $want = 65536 if $want > 65536;
+  my $chunk;
+  my $n = sysread($fh, $chunk, $want);
+  if (!defined($n)) {
+    next if $!{EINTR}; # transient, retry the read
+    exit 1;            # a real read error: fail closed, print nothing
+  }
+  last if $n == 0;
+  $buf .= $chunk;
+}
+exit 1 if length($buf) > $max_bytes; # oversized: reject, never truncate-and-serve
+
+print $buf;
+exit 0;
