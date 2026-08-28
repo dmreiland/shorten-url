@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+source "$SCRIPT_DIR/omarchy-shorten-url-lib"
+
 CONFIG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url"
 if [[ -n "${OMARCHY_SHORTEN_URL_CONFIG:-}" ]]; then
   CONFIG_FILE="$OMARCHY_SHORTEN_URL_CONFIG"
@@ -12,7 +15,7 @@ HISTORY_LIMIT=5
 
 usage() {
   cat <<'EOF'
-Usage: omarchy-shorten-url [URL] [--profile NAME] [--provider yourls|shlink|kutt|polr|bitly] [--config PATH]
+Usage: omarchy-shorten-url [URL] [--profile NAME] [--config PATH]
        omarchy-shorten-url --history [N]
        omarchy-shorten-url --copy TEXT
 
@@ -24,7 +27,6 @@ written back to the clipboard (wl-copy) and printed to stdout. The
 EOF
 }
 
-provider_override=""
 profile_override=""
 url=""
 show_history=false
@@ -33,7 +35,6 @@ copy_value=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --provider) provider_override="$2"; shift 2 ;;
     --profile) profile_override="$2"; shift 2 ;;
     --config) CONFIG_FILE="$2"; shift 2 ;;
     --history)
@@ -59,9 +60,14 @@ die() {
 command -v jq >/dev/null 2>&1 || die "jq is required"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 
+history_is_valid() {
+  printf '%s' "$1" | assert_json_limits && printf '%s' "$1" | assert_json_shape array
+}
+
 if $show_history; then
-  if [[ -f "$HISTORY_FILE" ]]; then
-    jq -c ".[0:${HISTORY_LIMIT}]" "$HISTORY_FILE" 2>/dev/null || echo "[]"
+  history_json="$(read_bounded_file "$HISTORY_FILE" 2>/dev/null || true)"
+  if [[ -n "$history_json" ]] && history_is_valid "$history_json"; then
+    printf '%s' "$history_json" | jq -c ".[0:${HISTORY_LIMIT}]" 2>/dev/null || echo "[]"
   else
     echo "[]"
   fi
@@ -83,40 +89,26 @@ fi
 [[ -n "$url" ]] || die "no URL provided and clipboard is empty"
 [[ "$url" =~ ^https?:// ]] || die "input does not look like a URL: $url"
 
-[[ -f "$CONFIG_FILE" ]] || die "config file not found: $CONFIG_FILE (copy config.example.json to config.json)"
+config_json="$(read_bounded_file "$CONFIG_FILE" --credential)" || die "config file not found, not a plain regular file, or too large: $CONFIG_FILE (copy config.example.json to config.json)"
+printf '%s' "$config_json" | assert_json_limits || die "config file exceeds size/shape limits: $CONFIG_FILE"
+printf '%s' "$config_json" | assert_json_shape object || die "config file is not a JSON object: $CONFIG_FILE"
+config_json="$(printf '%s' "$config_json" | canonicalize_config)" || die "config file must have a top-level \"profiles\" object: $CONFIG_FILE (copy config.example.json to config.json)"
+printf '%s' "$config_json" | assert_config_schema || die "config file has an invalid provider profile: $CONFIG_FILE"
 
-# config.json holds plaintext API credentials; keep it unreadable by other users.
-config_perms="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || echo '')"
-if [[ -n "$config_perms" && "$config_perms" != "600" && "$config_perms" != "400" ]]; then
-  echo "omarchy-shorten-url: warning: $CONFIG_FILE is readable beyond its owner (mode $config_perms); tightening to 600" >&2
-  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-fi
-
-profile_name=""
-if [[ -n "$profile_override" ]]; then
-  profile_name="$profile_override"
-elif [[ "$(jq -r 'if (.profiles? | type) == "object" then (.defaultProfile // empty) else empty end' "$CONFIG_FILE")" ]]; then
-  profile_name="$(jq -r '.defaultProfile // empty' "$CONFIG_FILE")"
+profile_name="$profile_override"
+if [[ -z "$profile_name" ]]; then
+  profile_name="$(printf '%s' "$config_json" | jq -r '.defaultProfile // empty')"
 fi
 
 if [[ -n "$profile_name" ]]; then
-  [[ -z "$provider_override" ]] || die "--provider cannot be combined with --profile"
-  provider="$(jq -r --arg p "$profile_name" '.profiles[$p].type // empty' "$CONFIG_FILE")"
+  provider="$(printf '%s' "$config_json" | jq -r --arg p "$profile_name" '.profiles[$p].type // empty')"
   [[ -n "$provider" ]] || die "profile not found: $profile_name"
 else
-  provider="${provider_override:-$(jq -r '.provider // empty' "$CONFIG_FILE")}"
+  die "no default profile configured (set one in $CONFIG_FILE, or pass --profile NAME)"
 fi
-[[ -n "$provider" ]] || die "no provider configured (set \"provider\" in $CONFIG_FILE or pass --provider)"
 
-# $provider is only interpolated into the jq filter below after the case
-# dispatch further down has confirmed it's a literal known provider name
-# (yourls/shlink/kutt/polr/bitly) — do not call cfg() before that check.
 cfg() {
-  if [[ -n "$profile_name" ]]; then
-    jq -r --arg p "$profile_name" --arg k "$1" '.profiles[$p][$k] // empty' "$CONFIG_FILE"
-  else
-    jq -r --arg p "$provider" --arg k "$1" '.[$p][$k] // empty' "$CONFIG_FILE"
-  fi
+  printf '%s' "$config_json" | jq -r --arg p "$profile_name" --arg k "$1" '.profiles[$p][$k] // empty'
 }
 
 curl_config_quote() {
@@ -287,20 +279,20 @@ case "$provider" in
 esac
 
 record_history() {
-  local entry tmp dir
+  local entry tmp dir existing_history
   dir="$(dirname "$HISTORY_FILE")"
   mkdir -p "$dir"
   entry="$(jq -n --arg s "$short_url" --arg l "$url" --arg p "$provider" \
     --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{shortUrl: $s, longUrl: $l, provider: $p, timestamp: $t}')"
   tmp="$(mktemp "$dir/.history.XXXXXX")"
-  if [[ -f "$HISTORY_FILE" ]]; then
-    jq --argjson e "$entry" '([$e] + .) | .[0:5]' "$HISTORY_FILE" > "$tmp" 2>/dev/null || echo "[$entry]" > "$tmp"
+  existing_history="$(read_bounded_file "$HISTORY_FILE" 2>/dev/null || true)"
+  if [[ -n "$existing_history" ]] && history_is_valid "$existing_history"; then
+    printf '%s' "$existing_history" | jq --argjson e "$entry" '([$e] + .) | .[0:5]' > "$tmp" 2>/dev/null || echo "[$entry]" > "$tmp"
   else
     echo "[$entry]" > "$tmp"
   fi
   mv "$tmp" "$HISTORY_FILE"
-  chmod 600 "$HISTORY_FILE" 2>/dev/null || true
 }
 
 record_history || echo "omarchy-shorten-url: warning: failed to record history" >&2

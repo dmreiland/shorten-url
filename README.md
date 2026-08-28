@@ -100,5 +100,15 @@ is validated and passed without shell interpolation. Provider credentials and co
 data are supplied to curl through a private file descriptor rather than command-line arguments,
 so they are not exposed in the process list. Every provider request has a 5-second connection
 timeout and 20-second overall timeout, and provider responses are capped at 64 KiB before JSON
-parsing. Existing legacy configs with a top-level `provider` remain readable; saving a profile
-migrates to the named-profile format.
+parsing. `config.json` has exactly one shape: a top-level `profiles` object; both scripts validate it
+against the same schema (`canonicalize_config`/`assert_config_schema` in `bin/omarchy-shorten-url-lib`)
+before trusting anything in it.
+
+Both `bin/omarchy-shorten-url` and `bin/omarchy-shorten-url-config` read `config.json`/`history.json`
+through the shared `bin/omarchy-shorten-url-lib` helper, which shells out to the `bin/omarchy-shorten-url-safe-read`
+Perl helper for the actual open — Bash's own redirection can't request `O_NOFOLLOW`/`O_NONBLOCK`, so
+the helper opens with both flags in one syscall (refusing a symlink and never blocking on a FIFO),
+verifies it opened a regular file it owns via `fstat` on the descriptor, and reads at most 64 KiB,
+rejecting outright rather than truncating if that's exceeded. All four files (`omarchy-shorten-url`,
+`omarchy-shorten-url-config`, `omarchy-shorten-url-lib`, `omarchy-shorten-url-safe-read`) must stay
+together for the plugin to run; **`perl` is a required runtime dependency** alongside `jq` and `curl`.

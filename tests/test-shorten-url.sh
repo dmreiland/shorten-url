@@ -102,15 +102,18 @@ grep -Fxq 'data-urlencode = "password=yourls-password"' "$CURL_CONFIG_CAPTURE"
 
 cat >"$OMARCHY_SHORTEN_URL_CONFIG" <<'EOF'
 {
-  "provider": "polr",
-  "polr": {
-    "apiUrl": "https://polr.test",
-    "apiKey": "polr-secret"
+  "profiles": {
+    "Polr": {
+      "type": "polr",
+      "apiUrl": "https://polr.test",
+      "apiKey": "polr-secret"
+    }
   }
 }
 EOF
 
-result=$("$repo_dir/bin/omarchy-shorten-url" --provider polr https://example.com)
+# --profile selects the configured provider profile.
+result=$("$repo_dir/bin/omarchy-shorten-url" --profile Polr https://example.com)
 [[ "$result" == "https://polr.test/selected" ]]
 ! tr '\0' '\n' < "$CURL_ARGS_CAPTURE" | grep -Fq 'polr-secret'
 ! tr '\0' '\n' < "$CURL_ARGS_CAPTURE" | grep -Fq -- '-G'
@@ -121,6 +124,23 @@ grep -Fxq 'connect-timeout = "5"' "$CURL_CONFIG_CAPTURE"
 grep -Fxq 'max-time = "20"' "$CURL_CONFIG_CAPTURE"
 grep -Fxq 'max-filesize = "65536"' "$CURL_CONFIG_CAPTURE"
 ! grep -Fq '?key=polr-secret' "$CURL_CONFIG_CAPTURE"
+
+# Exercise the provider-response size cap with an explicit profile.
+cat >"$OMARCHY_SHORTEN_URL_CONFIG" <<'EOF'
+{
+  "profiles": {
+    "Polr": {
+      "type": "polr",
+      "apiUrl": "https://polr.test",
+      "apiKey": "polr-secret"
+    }
+  }
+}
+EOF
+if CURL_OVERSIZE=1 "$repo_dir/bin/omarchy-shorten-url" --profile Polr https://example.com >/dev/null 2>&1; then
+  echo "oversized provider response unexpectedly succeeded" >&2
+  exit 1
+fi
 
 cat >"$OMARCHY_SHORTEN_URL_CONFIG" <<'EOF'
 {
@@ -146,10 +166,5 @@ for profile_result in "Shlink shlink-secret https://shlink.test/selected" "Kutt 
   ! tr '\0' '\n' < "$CURL_ARGS_CAPTURE" | grep -Fq "$secret"
   grep -Fq "$secret" "$CURL_CONFIG_CAPTURE"
 done
-
-if CURL_OVERSIZE=1 "$repo_dir/bin/omarchy-shorten-url" --provider polr https://example.com >/dev/null 2>&1; then
-  echo "oversized provider response unexpectedly succeeded" >&2
-  exit 1
-fi
 
 echo "shortening profile tests passed"
