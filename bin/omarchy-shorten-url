@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_FILE="${OMARCHY_SHORTEN_URL_CONFIG:-$PLUGIN_DIR/config.json}"
-HISTORY_FILE="${OMARCHY_SHORTEN_URL_HISTORY:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url/history.json}"
+CONFIG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url"
+if [[ -n "${OMARCHY_SHORTEN_URL_CONFIG:-}" ]]; then
+  CONFIG_FILE="$OMARCHY_SHORTEN_URL_CONFIG"
+else
+  CONFIG_FILE="$CONFIG_DIR/config.json"
+fi
+HISTORY_FILE="${OMARCHY_SHORTEN_URL_HISTORY:-$CONFIG_DIR/history.json}"
 HISTORY_LIMIT=5
 
 usage() {
@@ -115,24 +119,81 @@ cfg() {
   fi
 }
 
+curl_config_quote() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  printf '"%s"' "$value"
+}
+
+curl_config_line() {
+  local key="$1" value="$2"
+  printf '%s = %s' "$key" "$(curl_config_quote "$value")"
+}
+
+curl_config_add() {
+  CURL_CONFIG+="$(curl_config_line "$1" "$2")"
+  CURL_CONFIG+=$'\n'
+}
+
+curl_config_add_flag() {
+  CURL_CONFIG+="$1"
+  CURL_CONFIG+=$'\n'
+}
+
+curl_request() {
+  curl_config_add connect-timeout 5
+  curl_config_add max-time 20
+  curl_config_add max-filesize 65536
+  curl --config /dev/fd/3 3<<<"$CURL_CONFIG"
+}
+
+cap_response() {
+  local response_file response_size
+  response_file="$(mktemp)"
+  if ! head -c 65537 >"$response_file"; then
+    rm -f -- "$response_file"
+    return 1
+  fi
+  response_size="$(wc -c <"$response_file")"
+  if (( response_size > 65536 )); then
+    rm -f -- "$response_file"
+    echo "provider response exceeds 65536 bytes" >&2
+    return 1
+  fi
+  cat "$response_file"
+  rm -f -- "$response_file"
+}
+
 shorten_yourls() {
-  local api_url signature username password args short
+  local api_url signature username password short
   api_url="$(cfg apiUrl)"
   signature="$(cfg signature)"
   username="$(cfg username)"
   password="$(cfg password)"
   [[ -n "$api_url" ]] || die "yourls.apiUrl not configured"
+  [[ "$api_url" == */yourls-api.php ]] || api_url="${api_url%/}/yourls-api.php"
 
-  args=(--data-urlencode "action=shorturl" --data-urlencode "url=$url" --data-urlencode "format=json")
+  CURL_CONFIG=""
+  curl_config_add url "$api_url"
+  curl_config_add request POST
+  curl_config_add data-urlencode "action=shorturl"
+  curl_config_add data-urlencode "url=$url"
+  curl_config_add data-urlencode "format=json"
   if [[ -n "$signature" ]]; then
-    args+=(--data-urlencode "signature=$signature")
+    curl_config_add data-urlencode "signature=$signature"
   elif [[ -n "$username" && -n "$password" ]]; then
-    args+=(--data-urlencode "username=$username" --data-urlencode "password=$password")
+    curl_config_add data-urlencode "username=$username"
+    curl_config_add data-urlencode "password=$password"
   else
     die "yourls requires either signature or username+password"
   fi
 
-  short="$(curl -fsS "${args[@]}" "$api_url" | jq -r '.shorturl // empty')"
+  curl_config_add_flag silent
+  curl_config_add_flag show-error
+  curl_config_add_flag fail
+  short="$(curl_request | cap_response | jq -r '.shorturl // empty')"
   [[ -n "$short" ]] || die "yourls did not return a shorturl"
   echo "$short"
 }
@@ -143,9 +204,16 @@ shorten_shlink() {
   api_key="$(cfg apiKey)"
   [[ -n "$api_url" && -n "$api_key" ]] || die "shlink.apiUrl and shlink.apiKey must be configured"
 
-  short="$(curl -fsS -X POST "${api_url%/}/rest/v3/short-urls" \
-    -H "X-Api-Key: $api_key" -H "Content-Type: application/json" \
-    -d "$(jq -n --arg u "$url" '{longUrl: $u}')" | jq -r '.shortUrl // empty')"
+  CURL_CONFIG=""
+  curl_config_add url "${api_url%/}/rest/v3/short-urls"
+  curl_config_add request POST
+  curl_config_add header "X-Api-Key: $api_key"
+  curl_config_add header 'Content-Type: application/json'
+  curl_config_add data "$(jq -n --arg u "$url" '{longUrl: $u}')"
+  curl_config_add_flag silent
+  curl_config_add_flag show-error
+  curl_config_add_flag fail
+  short="$(curl_request | cap_response | jq -r '.shortUrl // empty')"
   [[ -n "$short" ]] || die "shlink did not return a shortUrl"
   echo "$short"
 }
@@ -156,9 +224,16 @@ shorten_kutt() {
   api_key="$(cfg apiKey)"
   [[ -n "$api_url" && -n "$api_key" ]] || die "kutt.apiUrl and kutt.apiKey must be configured"
 
-  short="$(curl -fsS -X POST "${api_url%/}/api/v2/links" \
-    -H "X-API-KEY: $api_key" -H "Content-Type: application/json" \
-    -d "$(jq -n --arg u "$url" '{target: $u}')" | jq -r '.link // empty')"
+  CURL_CONFIG=""
+  curl_config_add url "${api_url%/}/api/v2/links"
+  curl_config_add request POST
+  curl_config_add header "X-API-KEY: $api_key"
+  curl_config_add header 'Content-Type: application/json'
+  curl_config_add data "$(jq -n --arg u "$url" '{target: $u}')"
+  curl_config_add_flag silent
+  curl_config_add_flag show-error
+  curl_config_add_flag fail
+  short="$(curl_request | cap_response | jq -r '.link // empty')"
   [[ -n "$short" ]] || die "kutt did not return a link"
   echo "$short"
 }
@@ -169,21 +244,35 @@ shorten_polr() {
   api_key="$(cfg apiKey)"
   [[ -n "$api_url" && -n "$api_key" ]] || die "polr.apiUrl and polr.apiKey must be configured"
 
-  short="$(curl -fsS -G "${api_url%/}/api/v2/action/shorten" \
-    --data-urlencode "url=$url" --data-urlencode "key=$api_key")"
+  CURL_CONFIG=""
+  curl_config_add url "${api_url%/}/api/v2/action/shorten"
+  curl_config_add request POST
+  curl_config_add data-urlencode "url=$url"
+  curl_config_add data-urlencode "key=$api_key"
+  curl_config_add_flag silent
+  curl_config_add_flag show-error
+  curl_config_add_flag fail
+  short="$(curl_request | cap_response)"
   [[ -n "$short" ]] || die "polr did not return a short URL"
   echo "$short"
 }
 
 shorten_bitly() {
   local api_url access_token short
-  api_url="$(cfg apiUrl)"
+  api_url="https://api-ssl.bitly.com"
   access_token="$(cfg accessToken)"
   [[ -n "$api_url" && -n "$access_token" ]] || die "bitly.apiUrl and bitly.accessToken must be configured"
 
-  short="$(curl -fsS -X POST "${api_url%/}/v4/shorten" \
-    -H "Authorization: Bearer $access_token" -H "Content-Type: application/json" \
-    -d "$(jq -n --arg u "$url" '{long_url: $u}')" | jq -r '.link // empty')"
+  CURL_CONFIG=""
+  curl_config_add url "${api_url%/}/v4/shorten"
+  curl_config_add request POST
+  curl_config_add header "Authorization: Bearer $access_token"
+  curl_config_add header 'Content-Type: application/json'
+  curl_config_add data "$(jq -n --arg u "$url" '{long_url: $u}')"
+  curl_config_add_flag silent
+  curl_config_add_flag show-error
+  curl_config_add_flag fail
+  short="$(curl_request | cap_response | jq -r '.link // empty')"
   [[ -n "$short" ]] || die "bitly did not return a link"
   echo "$short"
 }

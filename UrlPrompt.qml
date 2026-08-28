@@ -39,6 +39,7 @@ Item {
     function isProviderUrl(value) {
         var candidate = normalizeProviderHost(value)
         if (!candidate) return false
+        if (candidate === "bitly.is") return true
         for (var i = 0; i < profileModel.count; i++) {
             if (candidate === normalizeProviderHost(profileModel.get(i).apiUrl)) return true
         }

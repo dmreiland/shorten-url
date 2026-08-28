@@ -124,7 +124,8 @@ Item {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: model.type + " · " + model.apiUrl
+                                        text: model.type + " · "
+                                            + (model.apiUrl || "https://api-ssl.bitly.com/v4/shorten")
                                         color: Color.muted
                                         font.family: Style.font.family
                                         font.pixelSize: Style.font.caption
@@ -218,7 +219,11 @@ Item {
                         Ui.TextField {
                             id: editorApiUrlField
                             Layout.fillWidth: true
-                            placeholderText: "API URL"
+                            visible: root.controller.editorType !== "bitly"
+                            placeholderText: root.controller.editorType === "yourls" ? "YOURLS base URL"
+                                : root.controller.editorType === "shlink" ? "Shlink base URL"
+                                : root.controller.editorType === "kutt" ? "Kutt base URL"
+                                : "Polr base URL"
                             text: root.controller.editorApiUrl
                             onTextChanged: root.controller.editorApiUrl = text
                         }
@@ -230,7 +235,6 @@ Item {
                             placeholderText: "API key"
                             echoMode: TextInput.Password
                             text: root.controller.editorApiKey
-                            echoMode: TextInput.Password
                             onTextChanged: root.controller.editorApiKey = text
                         }
 
@@ -238,8 +242,8 @@ Item {
                             Layout.fillWidth: true
                             visible: root.controller.editorType === "bitly"
                             placeholderText: "Access token"
-                            text: root.controller.editorAccessToken
                             echoMode: TextInput.Password
+                            text: root.controller.editorAccessToken
                             onTextChanged: root.controller.editorAccessToken = text
                         }
 
@@ -247,8 +251,8 @@ Item {
                             Layout.fillWidth: true
                             visible: root.controller.editorType === "yourls"
                             placeholderText: "Signature (or leave blank for username/password)"
-                            text: root.controller.editorSignature
                             echoMode: TextInput.Password
+                            text: root.controller.editorSignature
                             onTextChanged: root.controller.editorSignature = text
                         }
 

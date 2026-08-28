@@ -55,6 +55,7 @@ Ui.Panel {
     function isProviderUrl(value) {
         var candidate = normalizeProviderHost(value)
         if (!candidate) return false
+        if (candidate === "bitly.is") return true
         for (var i = 0; i < profileModel.count; i++) {
             if (candidate === normalizeProviderHost(profileModel.get(i).apiUrl)) return true
         }
@@ -101,6 +102,11 @@ Ui.Panel {
         shortener.running = true
     }
 
+    function showCopiedStatus() {
+        root.statusText = "Copied to clipboard"
+        copiedStatusTimer.start()
+    }
+
     onOpenedChanged: {
         if (root.opened) {
             clipboardReader.running = true
@@ -120,7 +126,8 @@ Ui.Panel {
     }
 
     function profileJson() {
-        var value = { type: root.editorType, apiUrl: root.editorApiUrl }
+        var value = { type: root.editorType }
+        if (root.editorType !== "bitly") value.apiUrl = root.editorApiUrl
         if (root.editorType === "yourls") {
             if (root.editorSignature.length > 0) value.signature = root.editorSignature
             else { value.username = root.editorUsername; value.password = root.editorPassword }
@@ -155,7 +162,7 @@ Ui.Panel {
     function saveProfile() {
         if (!root.editorName.trim()) { root.profileError = "Profile name is required"; return }
         profileWriter.command = [root.configHelperPath,
-            root.editingProfile && root.editorName.trim() !== root.selectedProfile ? "--rename-profile" : "--save-profile"]
+            root.editingProfile && root.editorName.trim() !== root.editingProfileName ? "--rename-profile" : "--save-profile"]
         if (root.editingProfile && root.editorName.trim() !== root.editingProfileName)
             profileWriter.command.push(root.editingProfileName)
         profileWriter.command.push(root.editorName.trim())
@@ -210,9 +217,6 @@ Ui.Panel {
                 root.pendingClipboardText = ""
                 root.focusUrlField()
             }
-        }
-        onExited: function(exitCode, exitStatus) {
-            if (exitCode !== 0) root.profileError = "No provider profiles configured"
         }
     }
 
@@ -290,6 +294,15 @@ Ui.Panel {
         id: historyCopier
     }
 
+    Timer {
+        id: copiedStatusTimer
+        interval: 3000
+        repeat: false
+        onTriggered: {
+            if (root.statusText === "Copied to clipboard") root.statusText = ""
+        }
+    }
+
     Process {
         id: clipboardReader
         command: ["wl-paste", "-n"]
@@ -314,7 +327,7 @@ Ui.Panel {
             if (exitCode === 0) {
                 resultField.text = shortenerOut.text.trim()
                 urlField.text = ""
-                root.statusText = "Copied to clipboard"
+                root.showCopiedStatus()
                 root.refreshHistory()
             } else {
                 resultField.text = ""
@@ -469,7 +482,11 @@ Ui.Panel {
 
                     Ui.TextField {
                         Layout.fillWidth: true
-                        placeholderText: "API URL"
+                        visible: root.editorType !== "bitly"
+                        placeholderText: root.editorType === "yourls" ? "YOURLS base URL"
+                            : root.editorType === "shlink" ? "Shlink base URL"
+                            : root.editorType === "kutt" ? "Kutt base URL"
+                            : "Polr base URL"
                         text: root.editorApiUrl
                         onTextChanged: root.editorApiUrl = text
                     }
@@ -480,7 +497,6 @@ Ui.Panel {
                         placeholderText: "API key"
                         echoMode: TextInput.Password
                         text: root.editorApiKey
-                        echoMode: TextInput.Password
                         onTextChanged: root.editorApiKey = text
                     }
 
@@ -488,8 +504,8 @@ Ui.Panel {
                         Layout.fillWidth: true
                         visible: root.editorType === "bitly"
                         placeholderText: "Access token"
-                        text: root.editorAccessToken
                         echoMode: TextInput.Password
+                        text: root.editorAccessToken
                         onTextChanged: root.editorAccessToken = text
                     }
 
@@ -497,8 +513,8 @@ Ui.Panel {
                         Layout.fillWidth: true
                         visible: root.editorType === "yourls"
                         placeholderText: "Signature (or leave blank for username/password)"
-                        text: root.editorSignature
                         echoMode: TextInput.Password
+                        text: root.editorSignature
                         onTextChanged: root.editorSignature = text
                     }
 
@@ -604,7 +620,7 @@ Ui.Panel {
                                 onClicked: {
                                     historyCopier.command = [root.scriptPath, "--copy", shortUrl]
                                     historyCopier.running = true
-                                    root.statusText = "Copied to clipboard"
+                                    root.showCopiedStatus()
                                 }
                             }
                         }

@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_FILE="${OMARCHY_SHORTEN_URL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.dmreiland.shorten-url/config.json}"
+CONFIG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url"
+if [[ -n "${OMARCHY_SHORTEN_URL_CONFIG:-}" ]]; then
+  CONFIG_FILE="$OMARCHY_SHORTEN_URL_CONFIG"
+else
+  CONFIG_FILE="$CONFIG_DIR/config.json"
+fi
+HISTORY_FILE="${OMARCHY_SHORTEN_URL_HISTORY:-$CONFIG_DIR/history.json}"
 
 die() { echo "omarchy-shorten-url-config: $*" >&2; exit 1; }
 
@@ -28,7 +34,13 @@ validate() {
       (.key | type) == "string" and (.key | length) > 0
       and (.value | type) == "object"
       and (.value.type | IN("yourls", "shlink", "kutt", "polr", "bitly"))
-      and ((.value.apiUrl | type) == "string" and (.value.apiUrl | length) > 0)
+    and (
+      if .value.type == "bitly" then
+        true
+      else
+        ((.value.apiUrl | type) == "string" and (.value.apiUrl | length) > 0)
+      end
+    )
       and (
         if .value.type == "yourls" then
           ((.value.signature | type) == "string" and (.value.signature | length) > 0)
@@ -68,7 +80,21 @@ write_config() {
   chmod 600 "$CONFIG_FILE"
 }
 
+remove_data() {
+  local confirmation
+  printf 'Remove Shorten URL configuration and history? [type yes to confirm] '
+  IFS= read -r confirmation || true
+  [[ "$confirmation" == "yes" ]] || die "cleanup cancelled"
+
+  rm -f -- "$CONFIG_FILE" "$HISTORY_FILE"
+  echo "removed configuration and history"
+}
+
 case "${1:-}" in
+  --remove-data)
+    [[ $# == 1 ]] || die "usage: --remove-data"
+    remove_data
+    ;;
   --list)
     cfg=$(read_config)
     jq -c '.defaultProfile as $default | [.profiles | to_entries[] | {name: .key, isDefault: (.key == $default)} + .value] | sort_by(.name)' <<<"$cfg"

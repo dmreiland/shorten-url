@@ -5,16 +5,14 @@ a self-hosted or cloud-hosted URL shortener: **YOURLS**, **Shlink**, **Kutt**, *
 
 ## Setup
 
-1. Copy the config template and fill in credentials for the provider profiles you use:
+1. Create the state directory and copy the config template there, then fill in credentials for the provider profiles you use:
 
    ```bash
-   cp config.example.json config.json
+   mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url"
+   cp config.example.json "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-shorten-url/config.json"
    ```
 
-   `config.json` is gitignored since it holds API keys/passwords. Each profile has a user-defined
-   name and an immutable provider `type`. The panel can add, edit, rename, delete, and select the
-   default profile. The script checks `config.json`'s permissions on every run and auto-tightens
-   them to `600` (owner read/write only) if it finds them looser.
+   The config file holds API keys/passwords and is permission-tightened to `600` (owner read/write only) on every run. Each profile has a user-defined name and an immutable provider `type`. The panel can add, edit, rename, delete, and select the default profile.
 
 2. Install the plugin:
 
@@ -29,6 +27,19 @@ a self-hosted or cloud-hosted URL shortener: **YOURLS**, **Shlink**, **Kutt**, *
    ```bash
    omarchy plugin validate ~/.config/omarchy/plugins/io.github.dmreiland.shorten-url
    ```
+
+## Remove the plugin and its data
+
+Remove the plugin with the Omarchy CLI, then remove its stored provider credentials and URL
+history. The cleanup command asks for explicit confirmation and does not remove the plugin source:
+
+```bash
+bin/omarchy-shorten-url-config --remove-data
+omarchy plugin remove io.github.dmreiland.shorten-url
+```
+
+Run the cleanup helper before removing the plugin, while its source is still available. It removes
+`${XDG_STATE_HOME:-~/.local/state}/omarchy-shorten-url/config.json` and `history.json`.
 
 ## Using the script standalone
 
@@ -75,15 +86,19 @@ omarchy-shell io.github.dmreiland.shorten-url toggle
 
 | Provider | Auth | Endpoint used |
 | --- | --- | --- |
-| YOURLS | `signature`, or `username`+`password` | `POST {apiUrl}` (`action=shorturl`) |
+| YOURLS | `signature`, or `username`+`password` | `POST {apiUrl}/yourls-api.php` (`action=shorturl`) |
 | Shlink | `X-Api-Key` header | `POST {apiUrl}/rest/v3/short-urls` |
 | Kutt | `X-API-KEY` header | `POST {apiUrl}/api/v2/links` |
-| Polr | `key` query param | `GET {apiUrl}/api/v2/action/shorten` |
-| Bitly | `Authorization: Bearer` header | `POST {apiUrl}/v4/shorten` |
+| Polr | `key` POST parameter | `POST {apiUrl}/api/v2/action/shorten` |
+| Bitly | `Authorization: Bearer` header | `POST https://api-ssl.bitly.com/v4/shorten` |
 
 ## Security notes
 
 `config.json` and `history.json` hold plaintext credentials and URL history; the script
 auto-tightens both to `600` on every run. User input (URLs, profile names, and provider selection)
-is always passed as argv, never interpolated into a shell string. Existing legacy configs with a
-top-level `provider` remain readable; saving a profile migrates to the named-profile format.
+is validated and passed without shell interpolation. Provider credentials and complete request
+data are supplied to curl through a private file descriptor rather than command-line arguments,
+so they are not exposed in the process list. Every provider request has a 5-second connection
+timeout and 20-second overall timeout, and provider responses are capped at 64 KiB before JSON
+parsing. Existing legacy configs with a top-level `provider` remain readable; saving a profile
+migrates to the named-profile format.
